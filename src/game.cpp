@@ -1,4 +1,3 @@
-// game.cpp (v1)
 #include "game.h"
 
 const char* moveErrorCode(MoveResult r) {

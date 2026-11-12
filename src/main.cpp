@@ -1,4 +1,3 @@
-// main.cpp (временная заглушка)
 #include "game.h"
 
 #include <iostream>

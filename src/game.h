@@ -1,4 +1,3 @@
-// game.h (v1)
 #pragma once
 
 #include <string>
