@@ -13,9 +13,12 @@
 #include <csignal>
 #include <cstdio>
 #include <iostream>
+#include <iterator>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifndef MSG_NOSIGNAL
@@ -86,7 +89,7 @@ public:
                 if (fd > maxFd) maxFd = fd;
             }
 
-            timeval tv{1, 0};  // TODO: heartbeat PING/PONG
+            timeval tv{ 1, 0 };  // TODO: heartbeat PING/PONG
             int ret = ::select(maxFd + 1, &rfds, &wfds, nullptr, &tv);
             if (ret < 0) {
                 if (errno == EINTR) continue;
@@ -195,20 +198,32 @@ private:
 };
 
 namespace {
-using Args = std::vector<std::string>;
+    using Args = std::vector<std::string>;
 
-std::vector<std::string> split(const std::string& line) {
-    std::vector<std::string> out;
-    std::istringstream ss(line);
-    std::string w;
-    while (ss >> w) out.push_back(w);
-    return out;
-}
+    std::vector<std::string> split(const std::string& line) {
+        std::vector<std::string> out;
+        std::istringstream ss(line);
+        std::string w;
+        while (ss >> w) out.push_back(w);
+        return out;
+    }
 
-std::string upper(std::string s) {
-    for (char& ch : s) ch = char(std::toupper(static_cast<unsigned char>(ch)));
-    return s;
-}
+    std::string upper(std::string s) {
+        for (char& ch : s) ch = char(std::toupper(static_cast<unsigned char>(ch)));
+        return s;
+    }
+
+    bool parseInt(const std::string& s, int& out) {
+        if (s.empty() || s.size() > 6) return false;
+        size_t i = (s[0] == '-' || s[0] == '+') ? 1 : 0;
+        if (i == s.size()) return false;
+        for (size_t j = i; j < s.size(); ++j)
+            if (!std::isdigit(static_cast<unsigned char>(s[j]))) return false;
+        out = std::stoi(s);
+        return true;
+    }
+
+    std::string sideStr(char c) { return std::string(1, c); }
 }  // namespace
 
 class Protocol : public NetHandler {
@@ -224,9 +239,18 @@ public:
         if (cmd == "QUIT") { net_.send(fd, "BYE"); net_.closeAfterFlush(fd); return; }
 
         auto it = userByFd_.find(fd);
-        if (cmd != "STATS") return net_.send(fd, "ERROR unknown_cmd");
+        const bool known = cmd == "STATS" || cmd == "WHO" || cmd == "NEWGAME" ||
+            cmd == "ACCEPT" || cmd == "DECLINE" || cmd == "CANCEL" || cmd == "MOVE";
+        if (!known) return net_.send(fd, "ERROR unknown_cmd");
         if (it == userByFd_.end()) return net_.send(fd, "ERROR not_logged_in");
-        cmdStats(fd, it->second, a);
+        const std::string me = it->second;
+        if (cmd == "STATS") cmdStats(fd, me, a);
+        else if (cmd == "WHO") cmdWho(fd);
+        else if (cmd == "NEWGAME") cmdNewGame(fd, me, a);
+        else if (cmd == "ACCEPT") cmdAccept(fd, me, a, true);
+        else if (cmd == "DECLINE") cmdAccept(fd, me, a, false);
+        else if (cmd == "CANCEL") cmdCancel(fd, me);
+        else if (cmd == "MOVE") cmdMove(fd, me, a);
     }
 
     void onDisconnect(int fd) override {
@@ -235,11 +259,42 @@ public:
         const std::string u = it->second;
         userByFd_.erase(fd);
         fdByUser_.erase(u);
+        auto mit = matches_.find(u);
+        if (mit != matches_.end()) {
+            auto m = mit->second;
+            // TODO: сохранять незаконченную партию вместо простого удаления
+            matches_.erase(m->x);
+            matches_.erase(m->o);
+        }
+        clearLobbyState(u);
         log_event("DISCONNECT " + u);
     }
 
 private:
+    struct Match { std::string x, o; Game game; };
+    struct Invite { int n = 3, k = 3; };
+
     bool online(const std::string& u) const { return fdByUser_.count(u) > 0; }
+    bool inGame(const std::string& user) const { return matches_.count(user) > 0; }
+
+    void sendTo(const std::string& user, const std::string& line) {
+        auto it = fdByUser_.find(user);
+        if (it != fdByUser_.end()) net_.send(it->second, line);
+    }
+
+    void clearLobbyState(const std::string& user, const std::string& except = "") {
+        for (auto it = invites_.begin(); it != invites_.end();) {
+            const auto& [from, to] = it->first;
+            if (from == user || to == user) {
+                const std::string other = (from == user) ? to : from;
+                if (other != except) sendTo(other, "INVITE_CANCELED " + user);
+                it = invites_.erase(it);
+            }
+            else ++it;
+        }
+        for (auto it = queue_.begin(); it != queue_.end();)
+            it = (it->second == user) ? queue_.erase(it) : std::next(it);
+    }
 
     void cmdRegister(int fd, const Args& a) {
         if (a.size() != 3) return net_.send(fd, "ERROR usage: REGISTER user pass");
@@ -268,13 +323,144 @@ private:
         UserStats s;
         if (!storage_.getStats(target, s)) return net_.send(fd, "ERROR user_not_found");
         net_.send(fd, "STATS_INFO " + target + " " + std::to_string(s.wins) + " " +
-                          std::to_string(s.losses) + " " + std::to_string(s.draws));
+            std::to_string(s.losses) + " " + std::to_string(s.draws));
+    }
+
+    void cmdWho(int fd) {
+        net_.send(fd, "WHO_BEGIN " + std::to_string(fdByUser_.size()));
+        for (const auto& [u, ufd] : fdByUser_)
+            net_.send(fd, "WHO_USER " + u + " " + (inGame(u) ? "in_game" : "free"));
+        net_.send(fd, "WHO_END");
+    }
+
+    void cmdNewGame(int fd, const std::string& me, const Args& a) {
+        if (inGame(me)) return net_.send(fd, "ERROR already_in_game");
+        int n = 3, k = 3;
+        std::string opp;
+        const size_t cnt = a.size() - 1;
+        if (cnt == 2 || cnt == 3) {
+            if (!parseInt(a[1], n) || !parseInt(a[2], k))
+                return net_.send(fd, "ERROR usage: NEWGAME [N K] [opponent]");
+            if (cnt == 3) opp = a[3];
+        }
+        else if (cnt == 1) opp = a[1];
+        else if (cnt != 0) return net_.send(fd, "ERROR usage: NEWGAME [N K] [opponent]");
+        if (!Game::validParams(n, k)) return net_.send(fd, "ERROR bad_params");
+        const std::string nk = std::to_string(n) + " " + std::to_string(k);
+        if (!opp.empty()) {
+            if (opp == me) return net_.send(fd, "ERROR cannot_play_self");
+            if (!online(opp)) return net_.send(fd, "ERROR opponent_offline");
+            if (inGame(opp)) return net_.send(fd, "ERROR opponent_busy");
+            invites_[{me, opp}] = Invite{ n, k };
+            net_.send(fd, "INVITE_SENT " + opp + " " + nk);
+            sendTo(opp, "INVITE_FROM " + me + " " + nk);
+            return;
+        }
+        for (auto it = queue_.begin(); it != queue_.end();)
+            it = (it->second == me) ? queue_.erase(it) : std::next(it);
+        auto q = queue_.find({ n, k });
+        if (q != queue_.end()) {
+            const std::string first = q->second;
+            queue_.erase(q);
+            startGame(first, me, n, k);
+        }
+        else {
+            queue_[{n, k}] = me;
+            net_.send(fd, "QUEUED " + nk);
+        }
+    }
+
+    void cmdAccept(int fd, const std::string& me, const Args& a, bool accept) {
+        if (a.size() > 2) return net_.send(fd, accept ? "ERROR usage: ACCEPT [user]" : "ERROR usage: DECLINE [user]");
+        if (accept && inGame(me)) return net_.send(fd, "ERROR already_in_game");
+        std::string from;
+        if (a.size() == 2) {
+            from = a[1];
+            if (!invites_.count({ from, me })) return net_.send(fd, "ERROR no_such_invite");
+        }
+        else {
+            int cnt = 0;
+            for (const auto& [key, inv] : invites_)
+                if (key.second == me) { from = key.first; ++cnt; }
+            if (cnt == 0) return net_.send(fd, "ERROR no_invites");
+            if (cnt > 1) return net_.send(fd, "ERROR multiple_invites_specify_user");
+        }
+        const Invite inv = invites_[{from, me}];
+        invites_.erase({ from, me });
+        if (!accept) {
+            net_.send(fd, "OK_DECLINED " + from);
+            sendTo(from, "INVITE_DECLINED " + me);
+            return;
+        }
+        if (!online(from)) return net_.send(fd, "ERROR opponent_offline");
+        if (inGame(from)) return net_.send(fd, "ERROR opponent_busy");
+        startGame(from, me, inv.n, inv.k);
+    }
+
+    void cmdCancel(int fd, const std::string& me) { clearLobbyState(me); net_.send(fd, "OK CANCEL"); }
+
+    void startGame(const std::string& x, const std::string& o, int n, int k) {
+        clearLobbyState(x, o); clearLobbyState(o, x);
+        auto m = std::make_shared<Match>();
+        m->x = x; m->o = o; m->game = Game(n, k);
+        matches_[x] = m; matches_[o] = m;
+        log_event("GAME_START " + x + " " + o + " " + std::to_string(n) + "x" + std::to_string(n) + " K=" + std::to_string(k));
+        const std::string nk = " " + std::to_string(n) + " " + std::to_string(k);
+        sendTo(x, "GAME_START " + o + " X" + nk);
+        sendTo(o, "GAME_START " + x + " O" + nk);
+        sendBoard(*m);
+    }
+
+    void sendBoard(const Match& m) {
+        const Game& g = m.game;
+        for (const std::string& who : { m.x, m.o }) {
+            if (g.lastRow() >= 0)
+                sendTo(who, "LAST " + std::to_string(g.lastRow()) + " " + std::to_string(g.lastCol()));
+            if (!g.finished()) sendTo(who, "TURN " + sideStr(g.turn()));
+            sendTo(who, g.boardLine());
+        }
+    }
+
+    void cmdMove(int fd, const std::string& me, const Args& a) {
+        if (a.size() != 3) return net_.send(fd, "ERROR usage: MOVE r c");
+        auto it = matches_.find(me);
+        if (it == matches_.end()) return net_.send(fd, "ERROR no_active_game");
+        int r, c;
+        if (!parseInt(a[1], r) || !parseInt(a[2], c)) return net_.send(fd, "ERROR usage: MOVE r c");
+        auto m = it->second;
+        MoveResult res = m->game.move((me == m->x) ? 'X' : 'O', r, c);
+        if (res != MoveResult::Ok) return net_.send(fd, std::string("ERROR ") + moveErrorCode(res));
+        log_event("MOVE " + me + " " + std::to_string(r) + " " + std::to_string(c));
+        sendBoard(*m);
+        if (m->game.finished()) finishMatch(m);
+    }
+
+    void finishMatch(std::shared_ptr<Match> m) {
+        const Game& g = m->game;
+        if (g.isDraw()) {
+            storage_.recordResult(m->x, m->o, 0.5);
+            sendTo(m->x, "DRAW"); sendTo(m->o, "DRAW");
+        }
+        else {
+            const bool xWon = g.winner() == 'X';
+            storage_.recordResult(m->x, m->o, xWon ? 1.0 : 0.0);
+            std::string line = "WIN " + sideStr(g.winner()) + " ";
+            for (size_t i = 0; i < g.winLine().size(); ++i) {
+                if (i) line += ';';
+                line += std::to_string(g.winLine()[i].first) + "," + std::to_string(g.winLine()[i].second);
+            }
+            sendTo(m->x, line); sendTo(m->o, line);
+        }
+        matches_.erase(m->x); matches_.erase(m->o);
     }
 
     Network& net_;
     Storage& storage_;
     std::map<int, std::string> userByFd_;
     std::map<std::string, int> fdByUser_;
+    std::map<std::string, std::shared_ptr<Match>> matches_;
+    std::map<std::pair<std::string, std::string>, Invite> invites_;
+    std::map<std::pair<int, int>, std::string> queue_;
 };
 
 int main(int argc, char** argv) {
