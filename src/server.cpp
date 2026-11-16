@@ -1,5 +1,5 @@
-// server.cpp (v1 — Network + StubProtocol + main)
 #include "game.h"
+#include "storage.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -8,11 +8,13 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cctype>
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <iostream>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -192,20 +194,87 @@ private:
     std::map<int, Connection> conns_;
 };
 
-class StubProtocol : public NetHandler {
+namespace {
+using Args = std::vector<std::string>;
+
+std::vector<std::string> split(const std::string& line) {
+    std::vector<std::string> out;
+    std::istringstream ss(line);
+    std::string w;
+    while (ss >> w) out.push_back(w);
+    return out;
+}
+
+std::string upper(std::string s) {
+    for (char& ch : s) ch = char(std::toupper(static_cast<unsigned char>(ch)));
+    return s;
+}
+}  // namespace
+
+class Protocol : public NetHandler {
 public:
-    explicit StubProtocol(Network& net) : net_(net) {}
+    Protocol(Network& net, Storage& storage) : net_(net), storage_(storage) {}
+
     void onLine(int fd, const std::string& line) override {
-        if (line == "QUIT") {
-            net_.send(fd, "BYE");
-            net_.closeAfterFlush(fd);
-            return;
-        }
-        net_.send(fd, "ERROR unknown_cmd");
+        Args a = split(line);
+        if (a.empty()) return;
+        const std::string cmd = upper(a[0]);
+        if (cmd == "REGISTER") return cmdRegister(fd, a);
+        if (cmd == "LOGIN") return cmdLogin(fd, a);
+        if (cmd == "QUIT") { net_.send(fd, "BYE"); net_.closeAfterFlush(fd); return; }
+
+        auto it = userByFd_.find(fd);
+        if (cmd != "STATS") return net_.send(fd, "ERROR unknown_cmd");
+        if (it == userByFd_.end()) return net_.send(fd, "ERROR not_logged_in");
+        cmdStats(fd, it->second, a);
     }
-    void onDisconnect(int) override {}
+
+    void onDisconnect(int fd) override {
+        auto it = userByFd_.find(fd);
+        if (it == userByFd_.end()) return;
+        const std::string u = it->second;
+        userByFd_.erase(fd);
+        fdByUser_.erase(u);
+        log_event("DISCONNECT " + u);
+    }
+
 private:
+    bool online(const std::string& u) const { return fdByUser_.count(u) > 0; }
+
+    void cmdRegister(int fd, const Args& a) {
+        if (a.size() != 3) return net_.send(fd, "ERROR usage: REGISTER user pass");
+        if (!valid_username(a[1])) return net_.send(fd, "ERROR bad_username");
+        if (!valid_password(a[2])) return net_.send(fd, "ERROR bad_password");
+        if (!storage_.registerUser(a[1], a[2])) return net_.send(fd, "ERROR user_exists");
+        log_event("REGISTER " + a[1]);
+        net_.send(fd, "OK REGISTER " + a[1]);
+    }
+
+    void cmdLogin(int fd, const Args& a) {
+        if (userByFd_.count(fd)) return net_.send(fd, "ERROR already_logged_in");
+        if (a.size() != 3) return net_.send(fd, "ERROR usage: LOGIN user pass");
+        const std::string& u = a[1];
+        if (!storage_.checkLogin(u, a[2])) return net_.send(fd, "ERROR bad_credentials");
+        if (online(u)) return net_.send(fd, "ERROR already_online");
+        userByFd_[fd] = u;
+        fdByUser_[u] = fd;
+        log_event("LOGIN " + u);
+        net_.send(fd, "OK LOGIN " + u);
+    }
+
+    void cmdStats(int fd, const std::string& me, const Args& a) {
+        if (a.size() > 2) return net_.send(fd, "ERROR usage: STATS [user]");
+        const std::string target = a.size() == 2 ? a[1] : me;
+        UserStats s;
+        if (!storage_.getStats(target, s)) return net_.send(fd, "ERROR user_not_found");
+        net_.send(fd, "STATS_INFO " + target + " " + std::to_string(s.wins) + " " +
+                          std::to_string(s.losses) + " " + std::to_string(s.draws));
+    }
+
     Network& net_;
+    Storage& storage_;
+    std::map<int, std::string> userByFd_;
+    std::map<std::string, int> fdByUser_;
 };
 
 int main(int argc, char** argv) {
@@ -216,7 +285,11 @@ int main(int argc, char** argv) {
 
     Network net;
     if (!net.listen(port)) return 1;
-    StubProtocol protocol(net);
+
+    Storage storage("users.txt");
+    Protocol protocol(net, storage);
+    log_event("SERVER_START port=" + std::to_string(port));
+
     std::cout << "Server listening on port " << port << "\n";
     net.run(protocol, g_stop);
     net.closeAll(protocol);

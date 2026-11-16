@@ -4,7 +4,7 @@
 
 
 bool valid_username(const std::string& u);  // [A-Z a-z 0-9 _-], 1..32
-bool valid_password(const std::string& p);  // печатные ASCII без пробелов, 1..128
+bool valid_password(const std::string& p);  // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ ASCII пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ, 1..128
 
 
 void log_event(const std::string& msg);
@@ -24,12 +24,12 @@ public:
     void recordResult(const std::string& a, const std::string& b, double scoreA);
 private:
     struct Account {
-        std::string pass;  // TODO: хэшировать пароли
+        std::string pass;  // TODO: пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ
         UserStats stats;
     };
     void loadUsers();
     void writeUsers() const;
 
     std::string usersFile_;
-    std::map\<std::string, Account> accounts_;
+    std::map<std::string, Account> accounts_;
 };
