@@ -1,5 +1,7 @@
 #include "storage.h"
+#include "game.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <ctime>
@@ -60,11 +62,13 @@ static void atomicWrite(const std::string& path, const std::string& content) {
         std::cerr << "storage: cannot rename " << tmp << "\n";
 }
 
-
-Storage::Storage(std::string usersFile) : usersFile_(std::move(usersFile)) {
+Storage::Storage(std::string usersFile, std::string savesFile)
+    : usersFile_(std::move(usersFile)), savesFile_(std::move(savesFile)) {
     loadUsers();
+    loadSaves();
 }
 
+// ---------- users.txt ----------
 
 void Storage::loadUsers() {
     std::ifstream in(usersFile_);
@@ -127,17 +131,65 @@ void Storage::recordResult(const std::string& a, const std::string& b, double sc
     if (ia == accounts_.end() || ib == accounts_.end() || a == b) {
         return;
     }
-    if (scoreA > 0.75) { 
-        ia->second.stats.wins++; 
-        ib->second.stats.losses++; 
+    if (scoreA > 0.75) {
+        ia->second.stats.wins++;
+        ib->second.stats.losses++;
     }
-    else if (scoreA < 0.25) { 
-        ia->second.stats.losses++; 
-        ib->second.stats.wins++; 
+    else if (scoreA < 0.25) {
+        ia->second.stats.losses++;
+        ib->second.stats.wins++;
     }
     else {
         ia->second.stats.draws++;
         ib->second.stats.draws++;
     }
     writeUsers();
+}
+
+// ---------- saves.txt ----------
+
+void Storage::loadSaves() {
+    std::ifstream in(savesFile_);
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream ss(line);
+        SavedGame g;
+        std::string turn;
+        if (!(ss >> g.p1 >> g.p2 >> turn >> g.n >> g.k >> g.board) || turn.size() != 1) continue;
+        g.turn = turn[0];
+        Game check;
+        if (!valid_username(g.p1) || !valid_username(g.p2) || g.p1 == g.p2 ||
+            !Game::restore(g.n, g.k, g.board, g.turn, check))
+            continue;
+        saves_.push_back(g);
+    }
+}
+
+void Storage::writeSaves() const {
+    std::ostringstream out;
+    for (const auto& g : saves_)
+        out << g.p1 << ' ' << g.p2 << ' ' << g.turn << ' ' << g.n << ' ' << g.k << ' ' << g.board << '\n';
+    atomicWrite(savesFile_, out.str());
+}
+
+void Storage::saveGame(const SavedGame& g) {
+    saves_.erase(std::remove_if(saves_.begin(), saves_.end(), [&](const SavedGame& s) {
+        return s.p1 == g.p1 || s.p2 == g.p1 || s.p1 == g.p2 || s.p2 == g.p2;
+        }), saves_.end());
+    saves_.push_back(g);
+    writeSaves();
+}
+
+bool Storage::findSave(const std::string& user, SavedGame& out) const {
+    for (const auto& s : saves_)
+        if (s.p1 == user || s.p2 == user) { out = s; return true; }
+    return false;
+}
+
+void Storage::eraseSavesWith(const std::string& user) {
+    auto before = saves_.size();
+    saves_.erase(std::remove_if(saves_.begin(), saves_.end(), [&](const SavedGame& s) {
+        return s.p1 == user || s.p2 == user;
+        }), saves_.end());
+    if (saves_.size() != before) writeSaves();
 }
