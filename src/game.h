@@ -12,7 +12,6 @@ enum class MoveResult {
     CellTaken     // клетка занята
 };
 
-// Код ошибки для протокола: "ERROR <code>".
 const char* moveErrorCode(MoveResult r);
 
 class Game {
@@ -20,12 +19,13 @@ public:
     static constexpr int kMinSize = 3;
     static constexpr int kMaxSize = 10;
 
-    // 3 <= N <= 10, 3 <= K <= N.
     static bool validParams(int n, int k);
 
     explicit Game(int n = 3, int k = 3);
 
-    // Ход символом sym ('X' или 'O') в клетку (row, col), нумерация с 0.
+    // Восстановление партии из сохранения. Возвращает false, если данные некорректны.
+    static bool restore(int n, int k, const std::string& cells, char turn, Game& out);
+
     MoveResult move(char sym, int row, int col);
 
     int size() const { return n_; }
@@ -35,12 +35,11 @@ public:
     int lastRow() const { return lastRow_; }
     int lastCol() const { return lastCol_; }
 
-    char winner() const { return winner_; }  // 'X', 'O' или '_'
+    char winner() const { return winner_; }
     bool isDraw() const { return draw_; }
     bool finished() const { return winner_ != '_' || draw_; }
     const std::vector<std::pair<int, int>>& winLine() const { return winLine_; }
 
-    // "BOARD X O _ _ X _ _ _ _" — N*N символов через пробел.
     std::string boardLine() const;
 
 private:

@@ -2,11 +2,11 @@
 
 const char* moveErrorCode(MoveResult r) {
     switch (r) {
-        case MoveResult::Ok: return "OK";
-        case MoveResult::GameOver: return "GAME_OVER";
-        case MoveResult::OutOfBounds: return "BAD_CELL";
-        case MoveResult::NotYourTurn: return "NOT_YOUR_TURN";
-        case MoveResult::CellTaken: return "CELL_TAKEN";
+    case MoveResult::Ok: return "OK";
+    case MoveResult::GameOver: return "GAME_OVER";
+    case MoveResult::OutOfBounds: return "BAD_CELL";
+    case MoveResult::NotYourTurn: return "NOT_YOUR_TURN";
+    case MoveResult::CellTaken: return "CELL_TAKEN";
     }
     return "UNKNOWN";
 }
@@ -15,7 +15,20 @@ bool Game::validParams(int n, int k) {
     return n >= kMinSize && n <= kMaxSize && k >= 3 && k <= n;
 }
 
-Game::Game(int n, int k) : n_(n), k_(k), cells_(size_t(n) * n, '_') {}
+Game::Game(int n, int k) : n_(n), k_(k), cells_(size_t(n)* n, '_') {}
+
+bool Game::restore(int n, int k, const std::string& cells, char turn, Game& out) {
+    if (!validParams(n, k) || cells.size() != size_t(n) * n) return false;
+    if (turn != 'X' && turn != 'O') return false;
+    for (char ch : cells)
+        if (ch != 'X' && ch != 'O' && ch != '_') return false;
+    Game g(n, k);
+    g.cells_ = cells;
+    g.turn_ = turn;
+    if (cells.find('_') == std::string::npos) g.draw_ = true;
+    out = g;
+    return true;
+}
 
 MoveResult Game::move(char sym, int row, int col) {
     if (finished()) return MoveResult::GameOver;
@@ -33,7 +46,7 @@ MoveResult Game::move(char sym, int row, int col) {
 
 void Game::checkAfterMove(int row, int col) {
     const char sym = at(row, col);
-    const int dirs[4][2] = {{0, 1}, {1, 0}, {1, 1}, {1, -1}};
+    const int dirs[4][2] = { {0, 1}, {1, 0}, {1, 1}, {1, -1} };
 
     for (const auto& d : dirs) {
         int r = row, c = col;
