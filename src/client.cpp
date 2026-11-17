@@ -2,12 +2,18 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <termios.h>
 
+#include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <csignal>
+#include <iomanip>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 static volatile std::sig_atomic_t g_stop = 0;
@@ -16,11 +22,53 @@ static void onSignal(int) {
     g_stop = 1;
 }
 
+// ---------- Цвета (ANSI) ----------
+namespace color {
+static const char* kReset  = "\033[0m";
+static const char* kBold   = "\033[1m";
+static const char* kRed    = "\033[31m";
+static const char* kGreen  = "\033[32m";
+static const char* kYellow = "\033[33m";
+static const char* kCyan   = "\033[36m";
+static const char* kGray   = "\033[90m";
+}  // namespace color
+
+// ---------- TerminalGuard: raw-режим для ввода пароля ----------
+struct TerminalGuard {
+    bool isTty = false;
+    termios orig{};
+
+    TerminalGuard() {
+        isTty = (::isatty(STDIN_FILENO) == 1);
+        if (isTty && ::tcgetattr(STDIN_FILENO, &orig) == 0) {
+            termios raw = orig;
+            raw.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO);
+            raw.c_cc[VMIN] = 1;
+            raw.c_cc[VTIME] = 0;
+            ::tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+        } else {
+            isTty = false;
+        }
+    }
+
+    ~TerminalGuard() {
+        if (isTty) ::tcsetattr(STDIN_FILENO, TCSANOW, &orig);
+    }
+};
+
 struct ClientState {
     int sockFd = -1;
     bool run = true;
     bool quitSent = false;
     std::string myName;
+
+    // --- партия и ввод ---
+    bool isTty = false;
+    std::string oppName, lastBoard, inputBuf, pwCmd, pwUser, pwBuf;
+    char mySide = '?', currentTurn = '?';
+    int N = 3, K = 3, lastR = -1, lastC = -1, escState = 0;
+    bool readingPassword = false;
+    std::set<std::pair<int, int>> winCells;
 };
 
 static bool sendAll(int fd, const std::string& data) {
@@ -42,26 +90,227 @@ static bool sendLine(int fd, const std::string& line) {
     return sendAll(fd, line + "\n");
 }
 
+// ---------- Отрисовка доски ----------
+static void renderBoard(const ClientState& st) {
+    if (st.lastBoard.empty()) return;
+    std::ostringstream out;
+    out << "\n";
+    for (int r = 0; r < st.N; ++r) {
+        for (int c = 0; c < st.N; ++c) {
+            // Разделители
+            out << (c == 0 ? " " : " ");
+            if (!st.lastBoard.empty()) {
+                // boardLine() приходит одной строкой; будем резать по N*N
+            }
+        }
+        out << "\n";
+    }
+    (void)out;
+}
+
+// ---------- Разбор серверных строк ----------
 static void handleServerLine(ClientState& st, const std::string& ln) {
     if (ln == "BYE") {
-        std::cout << "До свидания!\n";
+        std::cout << color::kCyan << "До свидания!" << color::kReset << "\n";
         st.run = false;
         return;
     }
-    std::cout << "[srv] " << ln << "\n";
+
+    std::istringstream ss(ln);
+    std::string tag;
+    ss >> tag;
+
+    if (tag == "OK") {
+        std::string what, who;
+        ss >> what >> who;
+        if (what == "LOGIN") {
+            st.myName = who;
+            std::cout << color::kGreen << "Вы вошли как " << who << color::kReset << "\n";
+            return;
+        }
+        if (what == "REGISTER") {
+            std::cout << color::kGreen << "Зарегистрирован: " << who << color::kReset << "\n";
+            return;
+        }
+        std::cout << "[srv] " << ln << "\n";
+        return;
+    }
+
+    if (tag == "ERROR") {
+        std::string code;
+        ss >> code;
+        std::cout << color::kRed << "Ошибка: " << code << color::kReset << "\n";
+        return;
+    }
+
+    if (tag == "GAME_START") {
+        std::string opp, side;
+        int n = 3, k = 3;
+        ss >> opp >> side >> n >> k;
+        st.oppName = opp;
+        st.mySide = side.empty() ? '?' : side[0];
+        st.N = n;
+        st.K = k;
+        st.lastR = st.lastC = -1;
+        st.winCells.clear();
+        std::cout << color::kBold << "Игра началась против " << opp
+                  << " (" << n << "x" << n << ", K=" << k << ", вы — "
+                  << st.mySide << ")" << color::kReset << "\n";
+        return;
+    }
+
+    if (tag == "TURN") {
+        std::string side;
+        ss >> side;
+        st.currentTurn = side.empty() ? '?' : side[0];
+        std::cout << (st.currentTurn == st.mySide
+                          ? color::kGreen
+                          : color::kGray)
+                  << (st.currentTurn == st.mySide ? "Ваш ход" : "Ход соперника")
+                  << color::kReset << "\n";
+        return;
+    }
+
+    if (tag == "LAST") {
+        ss >> st.lastR >> st.lastC;
+        return;
+    }
+
+    if (tag == "WIN") {
+        std::string side;
+        ss >> side;
+        std::string coords;
+        std::getline(ss, coords);
+        std::istringstream cs(coords);
+        std::string cell;
+        st.winCells.clear();
+        while (std::getline(cs, cell, ';')) {
+            if (cell.empty()) continue;
+            auto comma = cell.find(',');
+            if (comma == std::string::npos) continue;
+            int r = std::stoi(cell.substr(0, comma));
+            int c = std::stoi(cell.substr(comma + 1));
+            st.winCells.insert({r, c});
+        }
+        std::cout << color::kBold
+                  << (side.size() && side[0] == st.mySide ? "Вы победили!" : "Вы проиграли")
+                  << color::kReset << "\n";
+        return;
+    }
+
+    if (tag == "DRAW") {
+        std::cout << color::kYellow << "Ничья" << color::kReset << "\n";
+        return;
+    }
+
+    if (tag == "INVITE_FROM") {
+        std::string from;
+        int n = 3, k = 3;
+        ss >> from >> n >> k;
+        std::cout << color::kCyan << "Приглашение от " << from
+                  << " (" << n << "x" << n << ", K=" << k << "). "
+                  << "ACCEPT " << from << " / DECLINE " << from
+                  << color::kReset << "\n";
+        return;
+    }
+
+    if (tag == "INVITE_SENT" || tag == "INVITE_DECLINED" ||
+        tag == "INVITE_CANCELED" || tag == "OK_DECLINED") {
+        std::cout << "[srv] " << ln << "\n";
+        return;
+    }
+
+    if (tag == "QUEUED") {
+        std::cout << color::kCyan << "В очереди: " << ln << color::kReset << "\n";
+        return;
+    }
+
+    if (tag == "WHO_BEGIN") {
+        std::cout << color::kBold << "Игроки:" << color::kReset << "\n";
+        return;
+    }
+    if (tag == "WHO_USER") {
+        std::string u, status;
+        ss >> u >> status;
+        std::cout << "  " << u << " [" << status << "]\n";
+        return;
+    }
+    if (tag == "WHO_END") return;
+
+    if (tag == "STATS_INFO") {
+        std::string u;
+        int w = 0, l = 0, d = 0;
+        ss >> u >> w >> l >> d;
+        std::cout << color::kBold << "Статистика " << u << ": "
+                  << color::kReset << "побед=" << w << " поражений=" << l
+                  << " ничьих=" << d << "\n";
+        return;
+    }
+
+    // Иначе — считаем, что это доска (boardLine).
+    st.lastBoard = ln;
+    std::cout << color::kGray << ln << color::kReset << "\n";
+}
+
+// ---------- Ввод пользователя ----------
+static void processUserLine(ClientState& st, const std::string& line);
+
+static void flushInput(ClientState& st) {
+    size_t pos;
+    while (st.run && (pos = st.inputBuf.find('\n')) != std::string::npos) {
+        std::string ln = st.inputBuf.substr(0, pos);
+        st.inputBuf.erase(0, pos + 1);
+        if (!ln.empty() && ln.back() == '\r') ln.pop_back();
+
+        if (st.readingPassword) {
+            // Ввод пароля: без эха, показываем *
+            st.pwBuf = ln;
+            st.readingPassword = false;
+            std::string full = st.pwCmd + " " + st.pwUser + " " + st.pwBuf;
+            sendLine(st.sockFd, full);
+            std::cout << "\n";
+            st.pwCmd.clear();
+            st.pwUser.clear();
+            st.pwBuf.clear();
+        } else {
+            processUserLine(st, ln);
+        }
+    }
 }
 
 static void processUserLine(ClientState& st, const std::string& line) {
-    if (line.empty()) {
-        return;
-    }
-    sendLine(st.sockFd, line);
+    if (line.empty()) return;
+
     std::istringstream ss(line);
     std::string cmd;
     ss >> cmd;
-    if (cmd == "QUIT" || cmd == "quit") {
-        st.quitSent = true;
+
+    std::string up;
+    for (char ch : cmd) up.push_back(char(std::toupper(static_cast<unsigned char>(ch))));
+
+    // Перехватываем REGISTER/LOGIN, чтобы спросить пароль отдельно.
+    if (up == "REGISTER" || up == "LOGIN") {
+        std::string user, pass;
+        ss >> user;
+        ss >> pass;
+        if (!user.empty() && !pass.empty()) {
+            sendLine(st.sockFd, line);
+            return;
+        }
+        if (user.empty()) {
+            std::cout << color::kRed << "usage: " << up << " user pass" << color::kReset << "\n";
+            return;
+        }
+        st.pwCmd = up;
+        st.pwUser = user;
+        st.pwBuf.clear();
+        st.readingPassword = true;
+        std::cout << "Пароль: " << std::flush;
+        return;
     }
+
+    sendLine(st.sockFd, line);
+    if (up == "QUIT") st.quitSent = true;
 }
 
 int main(int argc, char** argv) {
@@ -87,7 +336,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    ClientState st{fd};
+    TerminalGuard guard;
+
+    ClientState st;
+    st.sockFd = fd;
+    st.isTty = guard.isTty;
+
     std::cout << "Connected to " << host << ":" << port << "\n";
 
     std::string netAcc, stdinAcc;
@@ -106,17 +360,13 @@ int main(int argc, char** argv) {
         if (pfds[0].revents & (POLLIN | POLLHUP)) {
             char buf[4096];
             ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
-            if (n <= 0) {
-                break;
-            }
+            if (n <= 0) break;
             netAcc.append(buf, size_t(n));
             size_t pos;
             while (st.run && (pos = netAcc.find('\n')) != std::string::npos) {
                 std::string ln = netAcc.substr(0, pos);
                 netAcc.erase(0, pos + 1);
-                if (!ln.empty() && ln.back() == '\r') {
-                    ln.pop_back();
-                }
+                if (!ln.empty() && ln.back() == '\r') ln.pop_back();
                 handleServerLine(st, ln);
             }
         }
@@ -129,14 +379,28 @@ int main(int argc, char** argv) {
                 continue;
             }
             stdinAcc.append(buf, size_t(n));
-            size_t pos;
-            while (st.run && (pos = stdinAcc.find('\n')) != std::string::npos) {
-                std::string ln = stdinAcc.substr(0, pos);
-                stdinAcc.erase(0, pos + 1);
-                if (!ln.empty() && ln.back() == '\r') {
-                    ln.pop_back();
+
+            // В raw-режиме эхо выключено — нужно вручную отрисовать ввод.
+            if (st.readingPassword && st.isTty) {
+                for (ssize_t i = 0; i < n; ++i) {
+                    char ch = buf[i];
+                    if (ch == '\n' || ch == '\r') {
+                        st.inputBuf.push_back('\n');
+                    } else if (ch == 127 || ch == 8) {
+                        if (!st.inputBuf.empty()) {
+                            st.inputBuf.pop_back();
+                            std::cout << "\b \b" << std::flush;
+                        }
+                    } else {
+                        st.inputBuf.push_back(ch);
+                        std::cout << '*' << std::flush;
+                    }
                 }
-                processUserLine(st, ln);
+                flushInput(st);
+            } else {
+                st.inputBuf.append(stdinAcc);
+                stdinAcc.clear();
+                flushInput(st);
             }
         }
     }
