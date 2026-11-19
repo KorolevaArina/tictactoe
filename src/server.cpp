@@ -89,7 +89,7 @@ public:
                 if (fd > maxFd) maxFd = fd;
             }
 
-            timeval tv{ 1, 0 };  // TODO: heartbeat PING/PONG
+            timeval tv{1, 0};  // TODO: heartbeat PING/PONG
             int ret = ::select(maxFd + 1, &rfds, &wfds, nullptr, &tv);
             if (ret < 0) {
                 if (errno == EINTR) continue;
@@ -198,32 +198,32 @@ private:
 };
 
 namespace {
-    using Args = std::vector<std::string>;
+using Args = std::vector<std::string>;
 
-    std::vector<std::string> split(const std::string& line) {
-        std::vector<std::string> out;
-        std::istringstream ss(line);
-        std::string w;
-        while (ss >> w) out.push_back(w);
-        return out;
-    }
+std::vector<std::string> split(const std::string& line) {
+    std::vector<std::string> out;
+    std::istringstream ss(line);
+    std::string w;
+    while (ss >> w) out.push_back(w);
+    return out;
+}
 
-    std::string upper(std::string s) {
-        for (char& ch : s) ch = char(std::toupper(static_cast<unsigned char>(ch)));
-        return s;
-    }
+std::string upper(std::string s) {
+    for (char& ch : s) ch = char(std::toupper(static_cast<unsigned char>(ch)));
+    return s;
+}
 
-    bool parseInt(const std::string& s, int& out) {
-        if (s.empty() || s.size() > 6) return false;
-        size_t i = (s[0] == '-' || s[0] == '+') ? 1 : 0;
-        if (i == s.size()) return false;
-        for (size_t j = i; j < s.size(); ++j)
-            if (!std::isdigit(static_cast<unsigned char>(s[j]))) return false;
-        out = std::stoi(s);
-        return true;
-    }
+bool parseInt(const std::string& s, int& out) {
+    if (s.empty() || s.size() > 6) return false;
+    size_t i = (s[0] == '-' || s[0] == '+') ? 1 : 0;
+    if (i == s.size()) return false;
+    for (size_t j = i; j < s.size(); ++j)
+        if (!std::isdigit(static_cast<unsigned char>(s[j]))) return false;
+    out = std::stoi(s);
+    return true;
+}
 
-    std::string sideStr(char c) { return std::string(1, c); }
+std::string sideStr(char c) { return std::string(1, c); }
 }  // namespace
 
 class Protocol : public NetHandler {
@@ -240,7 +240,8 @@ public:
 
         auto it = userByFd_.find(fd);
         const bool known = cmd == "STATS" || cmd == "WHO" || cmd == "NEWGAME" ||
-            cmd == "ACCEPT" || cmd == "DECLINE" || cmd == "CANCEL" || cmd == "MOVE";
+                           cmd == "ACCEPT" || cmd == "DECLINE" || cmd == "CANCEL" ||
+                           cmd == "MOVE" || cmd == "RESUME";
         if (!known) return net_.send(fd, "ERROR unknown_cmd");
         if (it == userByFd_.end()) return net_.send(fd, "ERROR not_logged_in");
         const std::string me = it->second;
@@ -251,6 +252,7 @@ public:
         else if (cmd == "DECLINE") cmdAccept(fd, me, a, false);
         else if (cmd == "CANCEL") cmdCancel(fd, me);
         else if (cmd == "MOVE") cmdMove(fd, me, a);
+        else if (cmd == "RESUME") cmdResume(fd, me);
     }
 
     void onDisconnect(int fd) override {
@@ -259,10 +261,16 @@ public:
         const std::string u = it->second;
         userByFd_.erase(fd);
         fdByUser_.erase(u);
+
         auto mit = matches_.find(u);
         if (mit != matches_.end()) {
             auto m = mit->second;
-            // TODO: сохранять незаконченную партию вместо простого удаления
+            if (!m->game.finished()) {
+                const Game& g = m->game;
+                storage_.saveGame(SavedGame{m->x, m->o, g.turn(), g.size(), g.winLength(), g.cells()});
+                log_event("SAVE " + m->x + " " + m->o);
+                sendTo(u == m->x ? m->o : m->x, "OPPONENT_LEFT_SAVED");
+            }
             matches_.erase(m->x);
             matches_.erase(m->o);
         }
@@ -289,11 +297,11 @@ private:
                 const std::string other = (from == user) ? to : from;
                 if (other != except) sendTo(other, "INVITE_CANCELED " + user);
                 it = invites_.erase(it);
-            }
-            else ++it;
+            } else ++it;
         }
         for (auto it = queue_.begin(); it != queue_.end();)
             it = (it->second == user) ? queue_.erase(it) : std::next(it);
+        pendingResume_.erase(user);
     }
 
     void cmdRegister(int fd, const Args& a) {
@@ -315,6 +323,19 @@ private:
         fdByUser_[u] = fd;
         log_event("LOGIN " + u);
         net_.send(fd, "OK LOGIN " + u);
+
+        // Автоподхват: если соперник ждёт в pendingResume_ — возобновляем сразу.
+        for (const auto& [waiter, sg] : pendingResume_) {
+            if ((sg.p1 == u || sg.p2 == u) && waiter != u && online(waiter) && !inGame(waiter)) {
+                SavedGame copy = sg;
+                startResumed(copy);
+                return;
+            }
+        }
+        // Иначе сообщаем, что есть сохранение.
+        SavedGame sg;
+        if (storage_.findSave(u, sg))
+            net_.send(fd, "RESUMED_AVAILABLE " + (sg.p1 == u ? sg.p2 : sg.p1) + " " + sideStr(sg.turn));
     }
 
     void cmdStats(int fd, const std::string& me, const Args& a) {
@@ -323,7 +344,7 @@ private:
         UserStats s;
         if (!storage_.getStats(target, s)) return net_.send(fd, "ERROR user_not_found");
         net_.send(fd, "STATS_INFO " + target + " " + std::to_string(s.wins) + " " +
-            std::to_string(s.losses) + " " + std::to_string(s.draws));
+                          std::to_string(s.losses) + " " + std::to_string(s.draws));
     }
 
     void cmdWho(int fd) {
@@ -342,8 +363,7 @@ private:
             if (!parseInt(a[1], n) || !parseInt(a[2], k))
                 return net_.send(fd, "ERROR usage: NEWGAME [N K] [opponent]");
             if (cnt == 3) opp = a[3];
-        }
-        else if (cnt == 1) opp = a[1];
+        } else if (cnt == 1) opp = a[1];
         else if (cnt != 0) return net_.send(fd, "ERROR usage: NEWGAME [N K] [opponent]");
         if (!Game::validParams(n, k)) return net_.send(fd, "ERROR bad_params");
         const std::string nk = std::to_string(n) + " " + std::to_string(k);
@@ -351,20 +371,19 @@ private:
             if (opp == me) return net_.send(fd, "ERROR cannot_play_self");
             if (!online(opp)) return net_.send(fd, "ERROR opponent_offline");
             if (inGame(opp)) return net_.send(fd, "ERROR opponent_busy");
-            invites_[{me, opp}] = Invite{ n, k };
+            invites_[{me, opp}] = Invite{n, k};
             net_.send(fd, "INVITE_SENT " + opp + " " + nk);
             sendTo(opp, "INVITE_FROM " + me + " " + nk);
             return;
         }
         for (auto it = queue_.begin(); it != queue_.end();)
             it = (it->second == me) ? queue_.erase(it) : std::next(it);
-        auto q = queue_.find({ n, k });
+        auto q = queue_.find({n, k});
         if (q != queue_.end()) {
             const std::string first = q->second;
             queue_.erase(q);
             startGame(first, me, n, k);
-        }
-        else {
+        } else {
             queue_[{n, k}] = me;
             net_.send(fd, "QUEUED " + nk);
         }
@@ -376,9 +395,8 @@ private:
         std::string from;
         if (a.size() == 2) {
             from = a[1];
-            if (!invites_.count({ from, me })) return net_.send(fd, "ERROR no_such_invite");
-        }
-        else {
+            if (!invites_.count({from, me})) return net_.send(fd, "ERROR no_such_invite");
+        } else {
             int cnt = 0;
             for (const auto& [key, inv] : invites_)
                 if (key.second == me) { from = key.first; ++cnt; }
@@ -386,7 +404,7 @@ private:
             if (cnt > 1) return net_.send(fd, "ERROR multiple_invites_specify_user");
         }
         const Invite inv = invites_[{from, me}];
-        invites_.erase({ from, me });
+        invites_.erase({from, me});
         if (!accept) {
             net_.send(fd, "OK_DECLINED " + from);
             sendTo(from, "INVITE_DECLINED " + me);
@@ -401,6 +419,8 @@ private:
 
     void startGame(const std::string& x, const std::string& o, int n, int k) {
         clearLobbyState(x, o); clearLobbyState(o, x);
+        storage_.eraseSavesWith(x);
+        storage_.eraseSavesWith(o);
         auto m = std::make_shared<Match>();
         m->x = x; m->o = o; m->game = Game(n, k);
         matches_[x] = m; matches_[o] = m;
@@ -411,9 +431,42 @@ private:
         sendBoard(*m);
     }
 
+    void startResumed(const SavedGame& sg) {
+        Game g;
+        if (!Game::restore(sg.n, sg.k, sg.board, sg.turn, g)) {
+            storage_.eraseSavesWith(sg.p1);
+            return;
+        }
+        clearLobbyState(sg.p1, sg.p2); clearLobbyState(sg.p2, sg.p1);
+        storage_.eraseSavesWith(sg.p1); storage_.eraseSavesWith(sg.p2);
+        log_event("LOAD_SAVE " + sg.p1 + " " + sg.p2);
+        auto m = std::make_shared<Match>();
+        m->x = sg.p1; m->o = sg.p2; m->game = g;
+        matches_[m->x] = m; matches_[m->o] = m;
+        const std::string nk = " " + std::to_string(sg.n) + " " + std::to_string(sg.k);
+        sendTo(m->x, "RESUMED " + m->o + " X" + nk);
+        sendTo(m->o, "RESUMED " + m->x + " O" + nk);
+        sendBoard(*m);
+    }
+
+    void cmdResume(int fd, const std::string& me) {
+        if (inGame(me)) return net_.send(fd, "ERROR already_in_game");
+        SavedGame sg;
+        if (!storage_.findSave(me, sg)) return net_.send(fd, "NO_SAVE");
+        log_event("RESUME " + me);
+        const std::string opp = (sg.p1 == me) ? sg.p2 : sg.p1;
+        if (inGame(opp)) return net_.send(fd, "ERROR opponent_busy");
+        if (online(opp)) startResumed(sg);
+        else {
+            clearLobbyState(me);
+            pendingResume_[me] = sg;
+            net_.send(fd, "WAIT_OPPONENT " + opp);
+        }
+    }
+
     void sendBoard(const Match& m) {
         const Game& g = m.game;
-        for (const std::string& who : { m.x, m.o }) {
+        for (const std::string& who : {m.x, m.o}) {
             if (g.lastRow() >= 0)
                 sendTo(who, "LAST " + std::to_string(g.lastRow()) + " " + std::to_string(g.lastCol()));
             if (!g.finished()) sendTo(who, "TURN " + sideStr(g.turn()));
@@ -440,8 +493,7 @@ private:
         if (g.isDraw()) {
             storage_.recordResult(m->x, m->o, 0.5);
             sendTo(m->x, "DRAW"); sendTo(m->o, "DRAW");
-        }
-        else {
+        } else {
             const bool xWon = g.winner() == 'X';
             storage_.recordResult(m->x, m->o, xWon ? 1.0 : 0.0);
             std::string line = "WIN " + sideStr(g.winner()) + " ";
@@ -461,6 +513,7 @@ private:
     std::map<std::string, std::shared_ptr<Match>> matches_;
     std::map<std::pair<std::string, std::string>, Invite> invites_;
     std::map<std::pair<int, int>, std::string> queue_;
+    std::map<std::string, SavedGame> pendingResume_;
 };
 
 int main(int argc, char** argv) {
@@ -472,7 +525,7 @@ int main(int argc, char** argv) {
     Network net;
     if (!net.listen(port)) return 1;
 
-    Storage storage("users.txt");
+    Storage storage("users.txt", "saves.txt");
     Protocol protocol(net, storage);
     log_event("SERVER_START port=" + std::to_string(port));
 

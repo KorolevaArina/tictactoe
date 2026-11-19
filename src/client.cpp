@@ -1,3 +1,4 @@
+// client.cpp (v4 — TerminalGuard, ASCII-доска, цвета, пароль, RESUME)
 #include <arpa/inet.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -97,7 +98,6 @@ static void renderBoard(const ClientState& st) {
     out << "\n";
     for (int r = 0; r < st.N; ++r) {
         for (int c = 0; c < st.N; ++c) {
-            // Разделители
             out << (c == 0 ? " " : " ");
             if (!st.lastBoard.empty()) {
                 // boardLine() приходит одной строкой; будем резать по N*N
@@ -143,7 +143,8 @@ static void handleServerLine(ClientState& st, const std::string& ln) {
         return;
     }
 
-    if (tag == "GAME_START") {
+    // --- GAME_START и RESUMED ---
+    if (tag == "GAME_START" || tag == "RESUMED") {
         std::string opp, side;
         int n = 3, k = 3;
         ss >> opp >> side >> n >> k;
@@ -153,9 +154,44 @@ static void handleServerLine(ClientState& st, const std::string& ln) {
         st.K = k;
         st.lastR = st.lastC = -1;
         st.winCells.clear();
-        std::cout << color::kBold << "Игра началась против " << opp
+        std::cout << color::kCyan << color::kBold << "--- "
+                  << (tag == "RESUMED" ? "Партия возобновлена: " : "Старт: ")
+                  << color::kReset << color::kBold << opp
                   << " (" << n << "x" << n << ", K=" << k << ", вы — "
                   << st.mySide << ")" << color::kReset << "\n";
+        return;
+    }
+
+    if (tag == "RESUMED_AVAILABLE") {
+        std::string opp, turn;
+        ss >> opp >> turn;
+        std::cout << color::kYellow << color::kBold
+                  << "Есть сохранённая партия против " << opp
+                  << " (ход " << turn << "). Введите RESUME, чтобы продолжить."
+                  << color::kReset << "\n";
+        return;
+    }
+
+    if (tag == "WAIT_OPPONENT") {
+        std::string opp;
+        ss >> opp;
+        std::cout << color::kCyan
+                  << "Ждём соперника " << opp << " для продолжения партии..."
+                  << color::kReset << "\n";
+        return;
+    }
+
+    if (tag == "NO_SAVE") {
+        std::cout << color::kGray << "Сохранённых партий нет." << color::kReset << "\n";
+        return;
+    }
+
+    if (tag == "OPPONENT_LEFT_SAVED") {
+        std::cout << color::kYellow << color::kBold
+                  << "Соперник отключился, партия сохранена." << color::kReset << "\n";
+        st.mySide = '?';
+        st.currentTurn = '?';
+        st.oppName.clear();
         return;
     }
 
@@ -263,7 +299,6 @@ static void flushInput(ClientState& st) {
         if (!ln.empty() && ln.back() == '\r') ln.pop_back();
 
         if (st.readingPassword) {
-            // Ввод пароля: без эха, показываем *
             st.pwBuf = ln;
             st.readingPassword = false;
             std::string full = st.pwCmd + " " + st.pwUser + " " + st.pwBuf;
