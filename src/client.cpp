@@ -1,4 +1,3 @@
-// client.cpp (v4 — TerminalGuard, ASCII-доска, цвета, пароль, RESUME)
 #include <arpa/inet.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -9,6 +8,7 @@
 #include <cerrno>
 #include <cmath>
 #include <csignal>
+#include <deque>
 #include <iomanip>
 #include <iostream>
 #include <set>
@@ -25,13 +25,14 @@ static void onSignal(int) {
 
 // ---------- Цвета (ANSI) ----------
 namespace color {
-static const char* kReset  = "\033[0m";
-static const char* kBold   = "\033[1m";
-static const char* kRed    = "\033[31m";
-static const char* kGreen  = "\033[32m";
-static const char* kYellow = "\033[33m";
-static const char* kCyan   = "\033[36m";
-static const char* kGray   = "\033[90m";
+static const char* kReset   = "\033[0m";
+static const char* kBold    = "\033[1m";
+static const char* kRed     = "\033[31m";
+static const char* kGreen   = "\033[32m";
+static const char* kYellow  = "\033[33m";
+static const char* kCyan    = "\033[36m";
+static const char* kGray    = "\033[90m";
+static const char* kMagenta = "\033[35m";
 }  // namespace color
 
 // ---------- TerminalGuard: raw-режим для ввода пароля ----------
@@ -70,6 +71,9 @@ struct ClientState {
     int N = 3, K = 3, lastR = -1, lastC = -1, escState = 0;
     bool readingPassword = false;
     std::set<std::pair<int, int>> winCells;
+
+    // --- чат ---
+    std::deque<std::string> chatLog;
 };
 
 static bool sendAll(int fd, const std::string& data) {
@@ -91,9 +95,16 @@ static bool sendLine(int fd, const std::string& line) {
     return sendAll(fd, line + "\n");
 }
 
+static std::string trim(const std::string& s) {
+    size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
 // ---------- Отрисовка доски ----------
 static void renderBoard(const ClientState& st) {
-    if (st.lastBoard.empty()) return;
+    if (st.lastBoard.empty() && st.chatLog.empty()) return;
     std::ostringstream out;
     out << "\n";
     for (int r = 0; r < st.N; ++r) {
@@ -105,7 +116,11 @@ static void renderBoard(const ClientState& st) {
         }
         out << "\n";
     }
-    (void)out;
+    if (!st.chatLog.empty()) {
+        out << color::kGray << "--- чат ---" << color::kReset << "\n";
+        for (const auto& m : st.chatLog) out << m << "\n";
+    }
+    std::cout << out.str() << std::flush;
 }
 
 // ---------- Разбор серверных строк ----------
@@ -154,6 +169,7 @@ static void handleServerLine(ClientState& st, const std::string& ln) {
         st.K = k;
         st.lastR = st.lastC = -1;
         st.winCells.clear();
+        st.chatLog.clear();
         std::cout << color::kCyan << color::kBold << "--- "
                   << (tag == "RESUMED" ? "Партия возобновлена: " : "Старт: ")
                   << color::kReset << color::kBold << opp
@@ -192,6 +208,23 @@ static void handleServerLine(ClientState& st, const std::string& ln) {
         st.mySide = '?';
         st.currentTurn = '?';
         st.oppName.clear();
+        return;
+    }
+
+    // --- чат ---
+    if (tag == "CHAT_MSG") {
+        std::string scope, from, rest;
+        ss >> scope >> from;
+        std::getline(ss, rest);
+        rest = trim(rest);
+        std::string formatted =
+            std::string(scope == "game" ? color::kMagenta "[Игра] " : color::kCyan "[Лобби] ") +
+            color::kBold + from + color::kReset + ": " + rest;
+        if (scope == "game") {
+            st.chatLog.push_back(formatted);
+            while (st.chatLog.size() > 5) st.chatLog.pop_front();
+        }
+        std::cout << formatted << "\n";
         return;
     }
 

@@ -224,6 +224,24 @@ bool parseInt(const std::string& s, int& out) {
 }
 
 std::string sideStr(char c) { return std::string(1, c); }
+
+std::string sanitizeChat(const std::string& raw) {
+    std::string out;
+    for (unsigned char ch : raw) {
+        if (ch < 32 || ch == 127) continue;
+        if (out.size() >= 256) break;
+        out.push_back(char(ch));
+    }
+    size_t cut = out.size();
+    while (cut > 0 && (static_cast<unsigned char>(out[cut - 1]) & 0xC0) == 0x80) --cut;
+    if (cut > 0 && (static_cast<unsigned char>(out[cut - 1]) & 0x80)) {
+        unsigned char lead = static_cast<unsigned char>(out[cut - 1]);
+        size_t need = (lead >= 0xF0) ? 4 : (lead >= 0xE0) ? 3 : 2;
+        if (out.size() - (cut - 1) < need) out.resize(cut - 1);
+    }
+    size_t b = out.find_first_not_of(' ');
+    return b == std::string::npos ? "" : out.substr(b, out.find_last_not_of(' ') - b + 1);
+}
 }  // namespace
 
 class Protocol : public NetHandler {
@@ -241,7 +259,7 @@ public:
         auto it = userByFd_.find(fd);
         const bool known = cmd == "STATS" || cmd == "WHO" || cmd == "NEWGAME" ||
                            cmd == "ACCEPT" || cmd == "DECLINE" || cmd == "CANCEL" ||
-                           cmd == "MOVE" || cmd == "RESUME";
+                           cmd == "MOVE" || cmd == "RESUME" || cmd == "CHAT";
         if (!known) return net_.send(fd, "ERROR unknown_cmd");
         if (it == userByFd_.end()) return net_.send(fd, "ERROR not_logged_in");
         const std::string me = it->second;
@@ -253,6 +271,7 @@ public:
         else if (cmd == "CANCEL") cmdCancel(fd, me);
         else if (cmd == "MOVE") cmdMove(fd, me, a);
         else if (cmd == "RESUME") cmdResume(fd, me);
+        else if (cmd == "CHAT") cmdChat(fd, me, line);
     }
 
     void onDisconnect(int fd) override {
@@ -324,7 +343,6 @@ private:
         log_event("LOGIN " + u);
         net_.send(fd, "OK LOGIN " + u);
 
-        // Автоподхват: если соперник ждёт в pendingResume_ — возобновляем сразу.
         for (const auto& [waiter, sg] : pendingResume_) {
             if ((sg.p1 == u || sg.p2 == u) && waiter != u && online(waiter) && !inGame(waiter)) {
                 SavedGame copy = sg;
@@ -332,7 +350,6 @@ private:
                 return;
             }
         }
-        // Иначе сообщаем, что есть сохранение.
         SavedGame sg;
         if (storage_.findSave(u, sg))
             net_.send(fd, "RESUMED_AVAILABLE " + (sg.p1 == u ? sg.p2 : sg.p1) + " " + sideStr(sg.turn));
@@ -416,6 +433,21 @@ private:
     }
 
     void cmdCancel(int fd, const std::string& me) { clearLobbyState(me); net_.send(fd, "OK CANCEL"); }
+
+    void cmdChat(int fd, const std::string& me, const std::string& line) {
+        size_t sp = line.find_first_of(" \t");
+        std::string msg = sanitizeChat(sp == std::string::npos ? "" : line.substr(sp + 1));
+        if (msg.empty()) return net_.send(fd, "ERROR empty_message");
+        auto it = matches_.find(me);
+        if (it != matches_.end()) {
+            std::string pkt = "CHAT_MSG game " + me + " " + msg;
+            sendTo(it->second->x, pkt); sendTo(it->second->o, pkt);
+        } else {
+            std::string pkt = "CHAT_MSG lobby " + me + " " + msg;
+            for (const auto& [u, ufd] : fdByUser_)
+                if (!inGame(u)) net_.send(ufd, pkt);
+        }
+    }
 
     void startGame(const std::string& x, const std::string& o, int n, int k) {
         clearLobbyState(x, o); clearLobbyState(o, x);
