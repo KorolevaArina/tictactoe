@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
@@ -62,6 +63,16 @@ static void atomicWrite(const std::string& path, const std::string& content) {
         std::cerr << "storage: cannot rename " << tmp << "\n";
 }
 
+// ---------- Elo ----------
+
+double elo_expected(int player, int opponent) {
+    return 1.0 / (1.0 + std::pow(10.0, (opponent - player) / 400.0));
+}
+
+int elo_updated(int player, int opponent, double score) {
+    return int(std::lround(player + kEloK * (score - elo_expected(player, opponent))));
+}
+
 Storage::Storage(std::string usersFile, std::string savesFile)
     : usersFile_(std::move(usersFile)), savesFile_(std::move(savesFile)) {
     loadUsers();
@@ -80,6 +91,7 @@ void Storage::loadUsers() {
         if (!(ss >> user >> a.pass >> a.stats.wins >> a.stats.losses >> a.stats.draws)) {
             continue;
         }
+        if (!(ss >> a.stats.elo)) a.stats.elo = kInitialElo;
         if (valid_username(user) && valid_password(a.pass)) {
             accounts_[user] = a;
         }
@@ -91,7 +103,7 @@ void Storage::writeUsers() const {
     std::ostringstream out;
     for (const auto& [user, a] : accounts_) {
         out << user << ' ' << a.pass << ' ' << a.stats.wins << ' ' << a.stats.losses << ' '
-            << a.stats.draws << '\n';
+            << a.stats.draws << ' ' << a.stats.elo << '\n';
     }
     atomicWrite(usersFile_, out.str());
 }
@@ -103,6 +115,7 @@ bool Storage::registerUser(const std::string& user, const std::string& pass) {
     }
     Account a;
     a.pass = pass;  // TODO: хэшировать вместо открытого текста
+    a.stats.elo = kInitialElo;
     accounts_[user] = a;
     writeUsers();
     return true;
@@ -131,6 +144,10 @@ void Storage::recordResult(const std::string& a, const std::string& b, double sc
     if (ia == accounts_.end() || ib == accounts_.end() || a == b) {
         return;
     }
+
+    const int oldA = ia->second.stats.elo;
+    const int oldB = ib->second.stats.elo;
+
     if (scoreA > 0.75) {
         ia->second.stats.wins++;
         ib->second.stats.losses++;
@@ -143,7 +160,22 @@ void Storage::recordResult(const std::string& a, const std::string& b, double sc
         ia->second.stats.draws++;
         ib->second.stats.draws++;
     }
+
+    ia->second.stats.elo = elo_updated(oldA, oldB, scoreA);
+    ib->second.stats.elo = elo_updated(oldB, oldA, 1.0 - scoreA);
     writeUsers();
+}
+
+std::vector<LeaderEntry> Storage::leaderboard(size_t limit) const {
+    std::vector<LeaderEntry> v;
+    for (const auto& [name, a] : accounts_) v.push_back({ name, a.stats });
+    std::sort(v.begin(), v.end(), [](const LeaderEntry& x, const LeaderEntry& y) {
+        if (x.stats.elo != y.stats.elo) return x.stats.elo > y.stats.elo;
+        if (x.stats.wins != y.stats.wins) return x.stats.wins > y.stats.wins;
+        return x.name < y.name;
+        });
+    if (v.size() > limit) v.resize(limit);
+    return v;
 }
 
 // ---------- saves.txt ----------
