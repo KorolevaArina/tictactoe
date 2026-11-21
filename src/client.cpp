@@ -228,6 +228,26 @@ static void handleServerLine(ClientState& st, const std::string& ln) {
         return;
     }
 
+    // --- таблица лидеров ---
+    if (tag == "TOP_BEGIN") {
+        int count = 0;
+        ss >> count;
+        std::cout << color::kBold << "Таблица лидеров (топ-" << count << "):"
+                  << color::kReset << "\n";
+        return;
+    }
+    if (tag == "TOP_ENTRY") {
+        int place = 0, elo = 0, w = 0, l = 0, d = 0;
+        std::string name;
+        ss >> place >> name >> elo >> w >> l >> d;
+        std::cout << "  " << std::setw(2) << place << ". "
+                  << color::kBold << name << color::kReset
+                  << "  elo=" << color::kGreen << elo << color::kReset
+                  << "  W/L/D=" << w << "/" << l << "/" << d << "\n";
+        return;
+    }
+    if (tag == "TOP_END") return;
+
     if (tag == "TURN") {
         std::string side;
         ss >> side;
@@ -308,11 +328,13 @@ static void handleServerLine(ClientState& st, const std::string& ln) {
 
     if (tag == "STATS_INFO") {
         std::string u;
-        int w = 0, l = 0, d = 0;
-        ss >> u >> w >> l >> d;
+        int w = 0, l = 0, d = 0, elo = 0;
+        ss >> u >> w >> l >> d >> elo;
         std::cout << color::kBold << "Статистика " << u << ": "
                   << color::kReset << "побед=" << w << " поражений=" << l
-                  << " ничьих=" << d << "\n";
+                  << " ничьих=" << d;
+        if (elo > 0) std::cout << " elo=" << color::kGreen << elo << color::kReset;
+        std::cout << "\n";
         return;
     }
 

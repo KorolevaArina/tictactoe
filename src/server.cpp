@@ -259,7 +259,8 @@ public:
         auto it = userByFd_.find(fd);
         const bool known = cmd == "STATS" || cmd == "WHO" || cmd == "NEWGAME" ||
                            cmd == "ACCEPT" || cmd == "DECLINE" || cmd == "CANCEL" ||
-                           cmd == "MOVE" || cmd == "RESUME" || cmd == "CHAT";
+                           cmd == "MOVE" || cmd == "RESUME" || cmd == "CHAT" ||
+                           cmd == "TOP" || cmd == "LEADERBOARD";
         if (!known) return net_.send(fd, "ERROR unknown_cmd");
         if (it == userByFd_.end()) return net_.send(fd, "ERROR not_logged_in");
         const std::string me = it->second;
@@ -272,6 +273,7 @@ public:
         else if (cmd == "MOVE") cmdMove(fd, me, a);
         else if (cmd == "RESUME") cmdResume(fd, me);
         else if (cmd == "CHAT") cmdChat(fd, me, line);
+        else if (cmd == "TOP" || cmd == "LEADERBOARD") cmdTop(fd, a);
     }
 
     void onDisconnect(int fd) override {
@@ -361,7 +363,8 @@ private:
         UserStats s;
         if (!storage_.getStats(target, s)) return net_.send(fd, "ERROR user_not_found");
         net_.send(fd, "STATS_INFO " + target + " " + std::to_string(s.wins) + " " +
-                          std::to_string(s.losses) + " " + std::to_string(s.draws));
+                          std::to_string(s.losses) + " " + std::to_string(s.draws) + " " +
+                          std::to_string(s.elo));
     }
 
     void cmdWho(int fd) {
@@ -369,6 +372,26 @@ private:
         for (const auto& [u, ufd] : fdByUser_)
             net_.send(fd, "WHO_USER " + u + " " + (inGame(u) ? "in_game" : "free"));
         net_.send(fd, "WHO_END");
+    }
+
+    void cmdTop(int fd, const Args& a) {
+        size_t limit = 10;
+        if (a.size() >= 2) {
+            int v = 0;
+            if (!parseInt(a[1], v) || v <= 0 || v > 100)
+                return net_.send(fd, "ERROR usage: TOP [limit]");
+            limit = size_t(v);
+        }
+        auto top = storage_.leaderboard(limit);
+        net_.send(fd, "TOP_BEGIN " + std::to_string(top.size()));
+        int place = 1;
+        for (const auto& e : top) {
+            net_.send(fd, "TOP_ENTRY " + std::to_string(place++) + " " + e.name + " " +
+                              std::to_string(e.stats.elo) + " " + std::to_string(e.stats.wins) +
+                              " " + std::to_string(e.stats.losses) + " " +
+                              std::to_string(e.stats.draws));
+        }
+        net_.send(fd, "TOP_END");
     }
 
     void cmdNewGame(int fd, const std::string& me, const Args& a) {
