@@ -10,6 +10,7 @@
 
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <iostream>
@@ -24,6 +25,8 @@
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
+
+using Clock = std::chrono::steady_clock;
 
 static volatile std::sig_atomic_t g_stop = 0;
 static void onSignal(int) { g_stop = 1; }
@@ -44,6 +47,9 @@ struct Connection {
     int fd = -1;
     std::string readBuf;
     std::string writeBuf;
+    Clock::time_point lastActive;
+    bool awaitingPong = false;
+    Clock::time_point pongSentAt;
     bool dead = false;
     bool closing = false;
 };
@@ -52,6 +58,8 @@ class Network {
 public:
     static constexpr size_t kMaxLine = 64 * 1024;
     static constexpr size_t kMaxWriteBuf = 1024 * 1024;
+    static constexpr int kPingAfterSec = 10;
+    static constexpr int kPongTimeoutSec = 5;
 
     ~Network() {
         for (auto& [fd, c] : conns_) ::close(fd);
@@ -89,7 +97,7 @@ public:
                 if (fd > maxFd) maxFd = fd;
             }
 
-            timeval tv{1, 0};  // TODO: heartbeat PING/PONG
+            timeval tv{1, 0};
             int ret = ::select(maxFd + 1, &rfds, &wfds, nullptr, &tv);
             if (ret < 0) {
                 if (errno == EINTR) continue;
@@ -103,6 +111,7 @@ public:
                 }
                 if (FD_ISSET(listenFd_, &rfds)) acceptClients();
             }
+            checkHeartbeat(Clock::now());
             reap(handler);
         }
     }
@@ -146,6 +155,7 @@ private:
             }
             Connection c;
             c.fd = fd;
+            c.lastActive = Clock::now();
             conns_[fd] = std::move(c);
         }
     }
@@ -161,11 +171,16 @@ private:
             c.dead = true;
             return;
         }
+        if (!c.readBuf.empty()) {
+            c.lastActive = Clock::now();
+            c.awaitingPong = false;
+        }
         size_t pos;
         while (!c.dead && !c.closing && (pos = c.readBuf.find('\n')) != std::string::npos) {
             std::string line = c.readBuf.substr(0, pos);
             c.readBuf.erase(0, pos + 1);
             if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line == "PONG") continue;  // heartbeat-ответ, не для handler
             if (!line.empty()) handler.onLine(c.fd, line);
         }
         if (c.readBuf.size() > kMaxLine) c.dead = true;
@@ -178,6 +193,20 @@ private:
             else if (n < 0 && errno == EINTR) continue;
             else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
             else { c.dead = true; return; }
+        }
+    }
+
+    void checkHeartbeat(Clock::time_point now) {
+        using std::chrono::seconds;
+        for (auto& [fd, c] : conns_) {
+            if (c.dead || c.closing) continue;
+            if (!c.awaitingPong && now - c.lastActive > seconds(kPingAfterSec)) {
+                send(fd, "PING");
+                c.awaitingPong = true;
+                c.pongSentAt = now;
+            } else if (c.awaitingPong && now - c.pongSentAt > seconds(kPongTimeoutSec)) {
+                c.dead = true;
+            }
         }
     }
 

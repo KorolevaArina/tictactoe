@@ -125,6 +125,10 @@ static void renderBoard(const ClientState& st) {
 
 // ---------- Разбор серверных строк ----------
 static void handleServerLine(ClientState& st, const std::string& ln) {
+    if (ln == "PING") {
+        sendLine(st.sockFd, "PONG");
+        return;
+    }
     if (ln == "BYE") {
         std::cout << color::kCyan << "До свидания!" << color::kReset << "\n";
         st.run = false;
@@ -158,7 +162,6 @@ static void handleServerLine(ClientState& st, const std::string& ln) {
         return;
     }
 
-    // --- GAME_START и RESUMED ---
     if (tag == "GAME_START" || tag == "RESUMED") {
         std::string opp, side;
         int n = 3, k = 3;
@@ -211,7 +214,6 @@ static void handleServerLine(ClientState& st, const std::string& ln) {
         return;
     }
 
-    // --- чат ---
     if (tag == "CHAT_MSG") {
         std::string scope, from, rest;
         ss >> scope >> from;
@@ -228,7 +230,6 @@ static void handleServerLine(ClientState& st, const std::string& ln) {
         return;
     }
 
-    // --- таблица лидеров ---
     if (tag == "TOP_BEGIN") {
         int count = 0;
         ss >> count;
@@ -338,7 +339,6 @@ static void handleServerLine(ClientState& st, const std::string& ln) {
         return;
     }
 
-    // Иначе — считаем, что это доска (boardLine).
     st.lastBoard = ln;
     std::cout << color::kGray << ln << color::kReset << "\n";
 }
@@ -378,7 +378,6 @@ static void processUserLine(ClientState& st, const std::string& line) {
     std::string up;
     for (char ch : cmd) up.push_back(char(std::toupper(static_cast<unsigned char>(ch))));
 
-    // Перехватываем REGISTER/LOGIN, чтобы спросить пароль отдельно.
     if (up == "REGISTER" || up == "LOGIN") {
         std::string user, pass;
         ss >> user;
@@ -470,7 +469,6 @@ int main(int argc, char** argv) {
             }
             stdinAcc.append(buf, size_t(n));
 
-            // В raw-режиме эхо выключено — нужно вручную отрисовать ввод.
             if (st.readingPassword && st.isTty) {
                 for (ssize_t i = 0; i < n; ++i) {
                     char ch = buf[i];
