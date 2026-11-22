@@ -2,11 +2,16 @@
 
 const char* moveErrorCode(MoveResult r) {
     switch (r) {
-    case MoveResult::Ok: return "OK";
-    case MoveResult::GameOver: return "GAME_OVER";
-    case MoveResult::OutOfBounds: return "BAD_CELL";
-    case MoveResult::NotYourTurn: return "NOT_YOUR_TURN";
-    case MoveResult::CellTaken: return "CELL_TAKEN";
+    case MoveResult::Ok:
+        return "OK";
+    case MoveResult::GameOver:
+        return "GAME_OVER";
+    case MoveResult::OutOfBounds:
+        return "BAD_CELL";
+    case MoveResult::NotYourTurn:
+        return "NOT_YOUR_TURN";
+    case MoveResult::CellTaken:
+        return "CELL_TAKEN";
     }
     return "UNKNOWN";
 }
@@ -17,38 +22,53 @@ bool Game::validParams(int n, int k) {
 
 Game::Game(int n, int k) : n_(n), k_(k), cells_(size_t(n)* n, '_') {}
 
-bool Game::restore(int n, int k, const std::string& cells, char turn, Game& out) {
-    if (!validParams(n, k) || cells.size() != size_t(n) * n) return false;
-    if (turn != 'X' && turn != 'O') return false;
+bool Game::restore(int n, int k, const std::string& cells, char turn,
+    Game& out) {
+    if (!validParams(n, k) || cells.size() != size_t(n) * n)
+        return false;
+    if (turn != 'X' && turn != 'O')
+        return false;
     for (char ch : cells)
-        if (ch != 'X' && ch != 'O' && ch != '_') return false;
+        if (ch != 'X' && ch != 'O' && ch != '_')
+            return false;
+
     Game g(n, k);
     g.cells_ = cells;
     g.turn_ = turn;
-    if (cells.find('_') == std::string::npos) g.draw_ = true;
+    // Сохраняются только незаконченные партии, но заполненное поле
+    // на всякий случай считаем ничьей, чтобы игра не «зависла».
+    if (cells.find('_') == std::string::npos)
+        g.draw_ = true;
     out = g;
     return true;
 }
 
 MoveResult Game::move(char sym, int row, int col) {
-    if (finished()) return MoveResult::GameOver;
-    if (!inside(row, col)) return MoveResult::OutOfBounds;
-    if (sym != turn_) return MoveResult::NotYourTurn;
-    if (at(row, col) != '_') return MoveResult::CellTaken;
+    if (finished())
+        return MoveResult::GameOver;
+    if (!inside(row, col))
+        return MoveResult::OutOfBounds;
+    if (sym != turn_)
+        return MoveResult::NotYourTurn;
+    if (at(row, col) != '_')
+        return MoveResult::CellTaken;
 
     cells_[row * n_ + col] = sym;
     lastRow_ = row;
     lastCol_ = col;
     checkAfterMove(row, col);
-    if (!finished()) turn_ = (turn_ == 'X' ? 'O' : 'X');
+    if (!finished())
+        turn_ = (turn_ == 'X' ? 'O' : 'X');
     return MoveResult::Ok;
 }
 
 void Game::checkAfterMove(int row, int col) {
     const char sym = at(row, col);
-    const int dirs[4][2] = { {0, 1}, {1, 0}, {1, 1}, {1, -1} };
+    const int dirs[4][2] = {
+        {0, 1}, {1, 0}, {1, 1}, {1, -1} }; // гориз., верт., 2 диагонали
 
     for (const auto& d : dirs) {
+        // Идём назад до начала серии, затем вперёд, собирая клетки.
         int r = row, c = col;
         while (inside(r - d[0], c - d[1]) && at(r - d[0], c - d[1]) == sym) {
             r -= d[0];
@@ -66,7 +86,8 @@ void Game::checkAfterMove(int row, int col) {
             return;
         }
     }
-    if (cells_.find('_') == std::string::npos) draw_ = true;
+    if (cells_.find('_') == std::string::npos)
+        draw_ = true;
 }
 
 std::string Game::boardLine() const {
