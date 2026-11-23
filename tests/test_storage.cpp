@@ -1,6 +1,6 @@
 // test_storage.cpp — тесты хранилища (storage.cpp) и SHA-256.
 #include "sha256.h"
-#include "storage.h"
+#include "../src/storage.h"
 
 #include <gtest/gtest.h>
 
@@ -55,7 +55,7 @@ TEST(Sha256, KnownVectors) {
 // ---------- Регистрация и вход ----------
 
 TEST_F(StorageTest, RegisterNewUser) {
-    Storage s(kUsers, kSaves);
+    Storage s(usersPath_, savesPath_);
     EXPECT_TRUE(s.registerUser("alice", "secret"));
     UserStats st;
     ASSERT_TRUE(s.getStats("alice", st));
@@ -64,20 +64,20 @@ TEST_F(StorageTest, RegisterNewUser) {
 }
 
 TEST_F(StorageTest, RegisterDuplicateFails) {
-    Storage s(kUsers, kSaves);
+    Storage s(usersPath_, savesPath_);
     EXPECT_TRUE(s.registerUser("alice", "secret"));
     EXPECT_FALSE(s.registerUser("alice", "other"));
 }
 
 TEST_F(StorageTest, RegisterRejectsBadInput) {
-    Storage s(kUsers, kSaves);
+    Storage s(usersPath_, savesPath_);
     EXPECT_FALSE(s.registerUser("bad name", "pass"));
     EXPECT_FALSE(s.registerUser("bob", ""));
     EXPECT_FALSE(s.registerUser("", "pass"));
 }
 
 TEST_F(StorageTest, LoginCorrectAndWrongPassword) {
-    Storage s(kUsers, kSaves);
+    Storage s(usersPath_, savesPath_);
     s.registerUser("alice", "secret");
     EXPECT_TRUE(s.checkLogin("alice", "secret"));
     EXPECT_FALSE(s.checkLogin("alice", "Secret"));
@@ -86,10 +86,10 @@ TEST_F(StorageTest, LoginCorrectAndWrongPassword) {
 
 TEST_F(StorageTest, FileStoresHashNotPassword) {
     {
-        Storage s(kUsers, kSaves);
+        Storage s(usersPath_, savesPath_);
         s.registerUser("alice", "secret");
     }
-    std::string content = readFile(kUsers);
+    std::string content = readFile(usersPath_);
     EXPECT_EQ(content.find("secret"), std::string::npos);
     EXPECT_NE(content.find(sha256_hex("secret")), std::string::npos);
     EXPECT_EQ(content, "alice " + sha256_hex("secret") + " 0 0 0 1200\n");
@@ -97,12 +97,12 @@ TEST_F(StorageTest, FileStoresHashNotPassword) {
 
 TEST_F(StorageTest, DataSurvivesReload) {
     {
-        Storage s(kUsers, kSaves);
+        Storage s(usersPath_, savesPath_);
         s.registerUser("alice", "a");
         s.registerUser("bob", "b");
         s.recordResult("alice", "bob", 1.0);
     }
-    Storage s(kUsers, kSaves);
+    Storage s(usersPath_, savesPath_);
     EXPECT_TRUE(s.checkLogin("bob", "b"));
     UserStats a;
     ASSERT_TRUE(s.getStats("alice", a));
@@ -122,7 +122,7 @@ TEST(Elo, Formula) {
 }
 
 TEST_F(StorageTest, RecordWinUpdatesStatsAndElo) {
-    Storage s(kUsers, kSaves);
+    Storage s(usersPath_, savesPath_);
     s.registerUser("alice", "a");
     s.registerUser("bob", "b");
     s.recordResult("alice", "bob", 1.0);
@@ -136,7 +136,7 @@ TEST_F(StorageTest, RecordWinUpdatesStatsAndElo) {
 }
 
 TEST_F(StorageTest, RecordDrawBetweenUnequalPlayers) {
-    Storage s(kUsers, kSaves);
+    Storage s(usersPath_, savesPath_);
     s.registerUser("alice", "a");
     s.registerUser("bob", "b");
     s.recordResult("alice", "bob", 1.0);  // 1216 / 1184
@@ -154,7 +154,7 @@ TEST_F(StorageTest, RecordDrawBetweenUnequalPlayers) {
 // ---------- Лидерборд ----------
 
 TEST_F(StorageTest, LeaderboardSortedByEloTop5) {
-    Storage s(kUsers, kSaves);
+    Storage s(usersPath_, savesPath_);
     for (const char* u : {"a", "b", "c", "d", "e", "f"}) s.registerUser(u, "p");
     s.recordResult("c", "a", 1.0);
     s.recordResult("c", "b", 1.0);
@@ -170,7 +170,7 @@ TEST_F(StorageTest, LeaderboardSortedByEloTop5) {
 }
 
 TEST_F(StorageTest, LeaderboardTieBrokenByWinsThenName) {
-    Storage s(kUsers, kSaves);
+    Storage s(usersPath_, savesPath_);
     s.registerUser("zed", "p");
     s.registerUser("amy", "p");
     auto top = s.leaderboard(5);
@@ -182,12 +182,12 @@ TEST_F(StorageTest, LeaderboardTieBrokenByWinsThenName) {
 
 TEST_F(StorageTest, SaveFindAndErase) {
     {
-        Storage s(kUsers, kSaves);
+        Storage s(usersPath_, savesPath_);
         s.saveGame(SavedGame{"alice", "bob", 'O', 3, 3, "X________"});
     }
-    EXPECT_EQ(readFile(kSaves), "alice bob O 3 3 X________\n");
+    EXPECT_EQ(readFile(savesPath_), "alice bob O 3 3 X________\n");
 
-    Storage s(kUsers, kSaves);  // загрузка с диска
+    Storage s(usersPath_, savesPath_);  // загрузка с диска
     SavedGame g;
     ASSERT_TRUE(s.findSave("bob", g));
     EXPECT_EQ(g.p1, "alice");
@@ -199,7 +199,7 @@ TEST_F(StorageTest, SaveFindAndErase) {
 }
 
 TEST_F(StorageTest, NewSaveReplacesOldSaveOfPlayer) {
-    Storage s(kUsers, kSaves);
+    Storage s(usersPath_, savesPath_);
     s.saveGame(SavedGame{"alice", "bob", 'X', 3, 3, "_________"});
     s.saveGame(SavedGame{"carol", "alice", 'O', 5, 4, "X" + std::string(24, '_')});
     SavedGame g;

@@ -102,27 +102,6 @@ static std::string trim(const std::string& s) {
     return s.substr(b, e - b + 1);
 }
 
-// ---------- Отрисовка доски ----------
-static void renderBoard(const ClientState& st) {
-    if (st.lastBoard.empty() && st.chatLog.empty()) return;
-    std::ostringstream out;
-    out << "\n";
-    for (int r = 0; r < st.N; ++r) {
-        for (int c = 0; c < st.N; ++c) {
-            out << (c == 0 ? " " : " ");
-            if (!st.lastBoard.empty()) {
-                // boardLine() приходит одной строкой; будем резать по N*N
-            }
-        }
-        out << "\n";
-    }
-    if (!st.chatLog.empty()) {
-        out << color::kGray << "--- чат ---" << color::kReset << "\n";
-        for (const auto& m : st.chatLog) out << m << "\n";
-    }
-    std::cout << out.str() << std::flush;
-}
-
 // ---------- Разбор серверных строк ----------
 static void handleServerLine(ClientState& st, const std::string& ln) {
     if (ln == "PING") {
@@ -220,7 +199,8 @@ static void handleServerLine(ClientState& st, const std::string& ln) {
         std::getline(ss, rest);
         rest = trim(rest);
         std::string formatted =
-            std::string(scope == "game" ? color::kMagenta "[Игра] " : color::kCyan "[Лобби] ") +
+            std::string(scope == "game" ? color::kMagenta : color::kCyan) +
+            (scope == "game" ? "[Игра] " : "[Лобби] ") +
             color::kBold + from + color::kReset + ": " + rest;
         if (scope == "game") {
             st.chatLog.push_back(formatted);
@@ -433,7 +413,7 @@ int main(int argc, char** argv) {
 
     std::cout << "Connected to " << host << ":" << port << "\n";
 
-    std::string netAcc, stdinAcc;
+    std::string netAcc;
     bool stdinEof = false;
 
     while (st.run && !g_stop) {
@@ -460,14 +440,13 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (!stdinEof && pfds.size() > 1 && (pfds[1].revents & (POLLIN | POLLHUP))) {
+if (!stdinEof && pfds.size() > 1 && (pfds[1].revents & (POLLIN | POLLHUP))) {
             char buf[1024];
             ssize_t n = ::read(STDIN_FILENO, buf, sizeof(buf));
             if (n <= 0) {
                 stdinEof = true;
                 continue;
             }
-            stdinAcc.append(buf, size_t(n));
 
             if (st.readingPassword && st.isTty) {
                 for (ssize_t i = 0; i < n; ++i) {
@@ -484,12 +463,10 @@ int main(int argc, char** argv) {
                         std::cout << '*' << std::flush;
                     }
                 }
-                flushInput(st);
             } else {
-                st.inputBuf.append(stdinAcc);
-                stdinAcc.clear();
-                flushInput(st);
+                st.inputBuf.append(buf, size_t(n));
             }
+            flushInput(st);
         }
     }
 
